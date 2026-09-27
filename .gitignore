@@ -1,0 +1,28 @@
+# Databases & Local Data
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment / Secrets & Keys
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.pytest_cache/
+
+# IDE & Build Artifacts
+.vscode/
+.idea/
+build/
+.pio/
+
+# OS & Logs
+.DS_Store
+Thumbs.db
+*.log

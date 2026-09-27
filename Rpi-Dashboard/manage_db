@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""
+Water Tank Monitor V2 — Database & Tank Capacity Management CLI Tool
+
+Usage:
+  ./manage_db --status                      # View current DB stats & tank capacity
+  ./manage_db --tank 500                    # Set tank capacity to 500 Liters
+  ./manage_db --6h                          # Clear data from the last 6 hours
+  ./manage_db --recent 24h                  # Clear data from the last 24 hours
+  ./manage_db --older-than 30d              # Clear data older than 30 days
+  ./manage_db --all                         # Clear all historical data
+  ./manage_db --6h --tank 750 -y            # Change capacity & clear recent 6h data (auto-confirm)
+"""
+
+import sys
+import os
+import argparse
+import time
+import datetime
+import re
+
+# Ensure backend directory is in python path
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
+try:
+    from backend.database import (
+        get_db_stats,
+        get_tank_capacity_liters,
+        set_tank_capacity_liters,
+        clear_db_records,
+        DB_PATH
+    )
+except ImportError:
+    # Handle direct execution inside backend directory
+    from database import (
+        get_db_stats,
+        get_tank_capacity_liters,
+        set_tank_capacity_liters,
+        clear_db_records,
+        DB_PATH
+    )
+
+
+def parse_duration(dur_str: str) -> float:
+    """Parse duration string like '6h', '30m', '7d', '360d', '1y' into seconds."""
+    s = dur_str.strip().lower()
+    if s.startswith("--"):
+        s = s[2:]
+    if s.startswith("-"):
+        s = s[1:]
+    
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*([a-z]*)$", s)
+    if not match:
+        raise ValueError(f"Invalid duration format: '{dur_str}'. Examples: 6h, 30m, 7d, 360d, 1y.")
+    
+    val, unit = float(match.group(1)), match.group(2)
+    if unit in ("m", "min", "mins", "minute", "minutes"):
+        return val * 60
+    elif unit in ("h", "hr", "hrs", "hour", "hours", ""):
+        return val * 3600
+    elif unit in ("d", "day", "days"):
+        return val * 86400
+    elif unit in ("y", "yr", "yrs", "year", "years"):
+        return val * 86400 * 365
+    else:
+        raise ValueError(f"Unknown time unit: '{unit}'. Use m (minutes), h (hours), d (days), or y (years).")
+
+
+def format_bytes(num_bytes: int) -> str:
+    """Format bytes into readable string."""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if abs(num_bytes) < 1024.0:
+            return f"{num_bytes:3.1f} {unit}"
+        num_bytes /= 1024.0
+    return f"{num_bytes:.1f} TB"
+
+
+def format_ts(ts: float) -> str:
+    """Format timestamp into readable local datetime string."""
+    if not ts:
+        return "N/A (Empty)"
+    dt = datetime.datetime.fromtimestamp(ts)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def print_status():
+    """Print database statistics and configuration."""
+    stats = get_db_stats()
+    print("\n=======================================================")
+    print("   WATER TANK MONITOR V2 - DATABASE & TANK STATUS     ")
+    print("=======================================================")
+    print(f"  Database Path:          {stats['db_path']}")
+    print(f"  File Size:              {format_bytes(stats['file_size_bytes'])}")
+    print(f"  Configured Tank Size:   {stats['tank_capacity_liters']} Liters")
+    print("\n-------------- RECORD COUNTS --------------")
+    print(f"  Telemetry Records:      {stats['telemetry_count']:,}")
+    print(f"  Motor Event Records:    {stats['motor_events_count']:,}")
+    print(f"  System Log Records:     {stats['system_logs_count']:,}")
+    print("\n-------------- TIME HORIZON --------------")
+    print(f"  Oldest Record:          {format_ts(stats['oldest_timestamp'])}")
+    print(f"  Newest Record:          {format_ts(stats['newest_timestamp'])}")
+    print("=======================================================\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Water Tank Monitor V2 Database & Tank Capacity Management Tool",
+        add_help=False
+    )
+    
+    parser.add_argument("-h", "--help", action="store_true", help="Show help menu")
+    parser.add_argument("-s", "--status", action="store_true", help="Display DB status & tank capacity")
+    parser.add_argument("-t", "--tank", type=int, metavar="LITERS", help="Set tank capacity in Liters (e.g. 500)")
+    parser.add_argument("-r", "--recent", type=str, metavar="DURATION", help="Clear data from recent duration (e.g. 6h, 7d)")
+    parser.add_argument("-o", "--older-than", type=str, metavar="DURATION", help="Clear data older than duration (e.g. 30d)")
+    parser.add_argument("-a", "--all", action="store_true", help="Clear ALL historical database records")
+    parser.add_argument("-y", "--yes", action="store_true", help="Auto-confirm prompt without interactive confirmation")
+    
+    # Catch raw flags like --6h, --24h, --7d, --30d, --360d
+    raw_args = sys.argv[1:]
+    processed_args = []
+    shortcut_recent_dur = None
+    
+    for arg in raw_args:
+        # Match pattern --6h, --360d, --1y
+        if re.match(r"^--\d+[a-z]*$", arg.lower()):
+            shortcut_recent_dur = arg[2:]
+        else:
+            processed_args.append(arg)
+            
+    args, unknown = parser.parse_known_args(processed_args)
+    
+    if args.help or (len(sys.argv) == 1 and not shortcut_recent_dur):
+        print("""
+===================================================================
+  WATER TANK MONITOR V2 — DATABASE & TANK MANAGEMENT CLI TOOL
+===================================================================
+
+COMMANDS & OPTIONS:
+  -s, --status                Display database size, record counts, and tank capacity
+  -t, --tank <LITERS>         Set tank capacity in Liters (e.g. --tank 500)
+  
+DATA PURGING OPTIONS:
+  --<duration>                Shortcut to clear recent data (e.g. --6h, --24h, --7d, --360d)
+  -r, --recent <duration>     Clear recent data (e.g. --recent 6h, --recent 30d)
+  -o, --older-than <duration> Clear data older than duration (e.g. --older-than 90d)
+  -a, --all                   Clear ALL historical records (telemetry, motor events, logs)
+  -y, --yes                   Skip interactive confirmation prompt
+
+EXAMPLES:
+  ./manage_db --status
+  ./manage_db --tank 500
+  ./manage_db --6h
+  ./manage_db --360d
+  ./manage_db --older-than 30d
+  ./manage_db --tank 750 --6h -y
+""")
+        return
+
+    # Handle Tank Capacity update if requested
+    if args.tank is not None:
+        try:
+            set_tank_capacity_liters(args.tank)
+            print(f"[OK] Updated Tank Capacity to {args.tank} Liters in database.")
+        except Exception as e:
+            print(f"[ERROR] Failed to update tank capacity: {e}")
+            sys.exit(1)
+
+    # Determine Purge Criteria
+    recent_dur_str = shortcut_recent_dur or args.recent
+    older_dur_str = args.older_than
+    clear_all = args.all
+    
+    if not recent_dur_str and not older_dur_str and not clear_all:
+        if args.status or args.tank is not None:
+            if args.status:
+                print_status()
+            return
+
+    # Process Purge Operation
+    recent_sec = None
+    older_sec = None
+    purge_description = ""
+    
+    try:
+        if clear_all:
+            purge_description = "ALL historical database records (telemetry, motor events, logs)"
+        elif recent_dur_str:
+            recent_sec = parse_duration(recent_dur_str)
+            cutoff_ts = time.time() - recent_sec
+            purge_description = f"records from the RECENT {recent_dur_str} (since {format_ts(cutoff_ts)})"
+        elif older_dur_str:
+            older_sec = parse_duration(older_dur_str)
+            cutoff_ts = time.time() - older_sec
+            purge_description = f"records OLDER than {older_dur_str} (before {format_ts(cutoff_ts)})"
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        sys.exit(1)
+        
+    print(f"\n[WARNING] You are about to purge {purge_description}.")
+    
+    if not args.yes:
+        confirm = input("Are you sure you want to proceed? [y/N]: ").strip().lower()
+        if confirm not in ("y", "yes"):
+            print("Operation cancelled.")
+            return
+
+    # Perform deletion
+    deleted = clear_db_records(recent_seconds=recent_sec, older_than_seconds=older_sec, clear_all=clear_all)
+    
+    print("\n[OK] Database purge operation complete:")
+    print(f"  - Deleted Telemetry Records:   {deleted['telemetry']:,}")
+    print(f"  - Deleted Motor Events:        {deleted['motor_events']:,}")
+    print(f"  - Deleted System Logs:         {deleted['system_logs']:,}")
+    print(f"  - Total Records Purged:        {sum(deleted.values()):,}\n")
+    
+    if args.status:
+        print_status()
+
+
+if __name__ == "__main__":
+    main()

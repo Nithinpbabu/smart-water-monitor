@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Water Tank Monitor — Dashboard</title>
+<meta name="description" content="Water Tank Monitor V2 — Live telemetry, motor control, and analytics dashboard">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="/static/css/modals.css">
+<!--
+  LIQUID DASHBOARD — production page
+  ====================================
+  Landing hero (big, centered) -> click -> docks to top, reveals a panel
+  with a MOTOR ON/OFF toggle and battery/runtime readouts.
+
+  INTEGRATION API  (window.LiquidDashboard)
+  -------------------------------------------------------------------------
+  LiquidDashboard.setProgress(value)
+      Drive the liquid gauge. 0-100, decimals fine. Call this from
+      whatever feed you have (poll / websocket / SSE).
+
+  LiquidDashboard.setBattery(percent)
+      0-100. Updates both the numeric readout and the icon's fill level.
+
+  LiquidDashboard.setRuntime(text)
+      Any string, e.g. "2h 14m". Formatting is left to you on purpose —
+      pass whatever your backend already computes.
+
+  LiquidDashboard.setMotor(isOn)
+      Sync the toggle's visual state to what the backend actually reports
+      (e.g. on page load, or after a command is confirmed / rejected).
+      This does NOT fire onMotorToggle — it's one-way, backend -> UI,
+      so you can safely call it from inside your own onMotorToggle
+      handler without creating a feedback loop.
+
+  LiquidDashboard.onMotorToggle(callback)
+      Register a handler that fires the moment the user taps the motor
+      toggle. The toggle flips optimistically in the UI immediately;
+      callback receives the new intended boolean state so you can send
+      the actual command to your backend. If the command fails, call
+      setMotor(previousState) to revert the UI.
+
+        LiquidDashboard.onMotorToggle((wantsOn) => {
+          sendMotorCommand(wantsOn)
+            .catch(() => LiquidDashboard.setMotor(!wantsOn));
+        });
+
+  LiquidDashboard.onSettingsClick(callback)
+      Register a handler that fires when the settings (gear) icon is
+      tapped. Nothing else happens on click — no built-in menu or sheet —
+      wire this to whatever settings UI you build.
+
+  LiquidDashboard.dock()
+      Programmatically trigger the hero -> docked transition, in case you
+      need to skip the "click to begin" step (e.g. returning session).
+
+  LiquidDashboard.destroy()
+      Tears down the WebGL context and all listeners. Call this if the
+      page is ever torn down without a full reload (SPA route change) —
+      otherwise the WebGL context stays alive and counts against the
+      browser's per-page context limit.
+  -------------------------------------------------------------------------
+-->
+<style>
+  :root{
+    box-sizing:border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    /* Dock position centers the WHOLE assembly (gauge + gap + panel) within
+       the space ABOVE the reserved bottom menu bar, not just the gauge and
+       not the full screen. Panel height = motor-toggle(76) + row margin(20)
+       + stat row(48) + row margin(20) + settings button(48) = 212px.
+       Assembly = gauge(220) + gap(40) + panel(212) = 472px, half = 236px.
+       --menu-reserve is a guess at the future bottom bar's height — once
+       you build it, update this to match and the layout recenters itself.
+       --extra-lift is a manual additional nudge upward on top of that. */
+    --menu-reserve: 72px;
+    --extra-lift: 0.7cm;
+    --dock-top: max(
+      calc(env(safe-area-inset-top, 0px) + 24px),
+      calc((100vh - var(--menu-reserve)) / 2 - 236px - var(--extra-lift))
+    );
+    --gauge-size: 220px;
+    --hero-size: 300px;
+    --panel-gap: 40px;
+  }
+  *,*::before,*::after{ box-sizing:inherit; }
+  html,body{ height:100%; margin:0; background:#000; overflow:hidden; }
+  html{
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    user-select: none;
+  }
+  body{
+    position:relative;
+    font-family: ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    color:#eaf1ff;
+  }
+
+  /* ================= hero / dock ================= */
+  #hero-wrap{
+    position:fixed;
+    left:50%;
+    top:50%;
+    transform: translate(-50%,-50%) scale(calc(var(--hero-size) / var(--gauge-size)));
+    transition: top .85s cubic-bezier(.22,1,.36,1), transform .85s cubic-bezier(.22,1,.36,1);
+    cursor:pointer;
+    z-index:5;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    user-select: none;
+    touch-action: manipulation;
+  }
+  #hero-wrap.docked{
+    top: var(--dock-top);
+    transform: translate(-50%,0) scale(1);
+    cursor:default;
+  }
+
+  /* ================= panel (revealed once docked) ================= */
+  #panel{
+    position:fixed;
+    left:50%;
+    top: calc(var(--dock-top) + var(--gauge-size) + var(--panel-gap));
+    transform: translate(-50%, 10px);
+    width:min(86vw, 260px);
+    opacity:0;
+    pointer-events:none;
+    transition: opacity .55s ease, transform .55s ease;
+    z-index:4;
+  }
+  #panel.revealed{
+    opacity:1;
+    transform: translate(-50%, 0);
+    pointer-events:auto;
+  }
+
+  /* ---------- motor toggle: CSS glass (not WebGL — see chat notes) ---------- */
+  .motor-toggle{
+    position:relative;
+    width:100%;
+    height:76px;
+    border:none;
+    border-radius:999px;
+    padding:0 22px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    background:linear-gradient(160deg, rgba(255,255,255,.10), rgba(255,255,255,.02));
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border:1px solid rgba(255,255,255,.14);
+    box-shadow:
+      0 10px 30px rgba(0,0,0,.55),
+      inset 0 1px 1px rgba(255,255,255,.25),
+      inset 0 -14px 22px rgba(0,0,0,.35);
+    cursor:pointer;
+    overflow:hidden;
+    isolation:isolate;
+    transition: box-shadow .45s ease;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    user-select: none;
+    touch-action: manipulation;
+  }
+  .motor-toggle:focus{ outline:none; }
+  .motor-toggle:focus-visible{ outline:2px solid rgba(255,255,255,.55); outline-offset:3px; }
+  .motor-toggle .mt-glow{
+    position:absolute; inset:-40%;
+    border-radius:50%;
+    filter:blur(30px);
+    opacity:.55;
+    transition: background .45s ease;
+    z-index:-1;
+    animation: mtDrift 7s ease-in-out infinite;
+  }
+  @keyframes mtDrift{
+    0%,100%{ transform:translate(-6%,-4%) scale(1); }
+    50%{ transform:translate(6%,4%) scale(1.08); }
+  }
+  .motor-toggle[data-on="false"] .mt-glow{
+    background: radial-gradient(circle, rgba(255,70,70,.55), transparent 70%);
+  }
+  .motor-toggle[data-on="true"] .mt-glow{
+    background: radial-gradient(circle, rgba(60,255,140,.55), transparent 70%);
+  }
+  .motor-toggle[data-on="false"]{ box-shadow:0 10px 30px rgba(120,0,0,.35), inset 0 1px 1px rgba(255,255,255,.25), inset 0 -14px 22px rgba(0,0,0,.35); }
+  .motor-toggle[data-on="true"]{  box-shadow:0 10px 30px rgba(0,120,60,.35),  inset 0 1px 1px rgba(255,255,255,.25), inset 0 -14px 22px rgba(0,0,0,.35); }
+
+  .mt-label{
+    display:flex; flex-direction:column; align-items:flex-start; gap:2px;
+    text-align:left;
+  }
+  .mt-label .mt-name{ font-size:11px; font-weight:600; letter-spacing:.16em; color:rgba(234,241,255,.55); }
+  .mt-label .mt-state{ font-size:19px; font-weight:700; letter-spacing:.01em; transition:color .3s ease; }
+  .motor-toggle[data-on="false"] .mt-state{ color:#ff6a6a; }
+  .motor-toggle[data-on="true"]  .mt-state{ color:#5affa0; }
+
+  .mt-switch{
+    position:relative;
+    width:52px; height:30px;
+    border-radius:999px;
+    background:rgba(0,0,0,.45);
+    border:1px solid rgba(255,255,255,.14);
+    box-shadow: inset 0 2px 6px rgba(0,0,0,.6);
+    flex:none;
+  }
+  .mt-knob{
+    position:absolute; top:3px; left:3px;
+    width:22px; height:22px; border-radius:50%;
+    background: radial-gradient(circle at 32% 28%, #fff, #b9c8ea 45%, #6d7fa8 100%);
+    box-shadow: 0 2px 6px rgba(0,0,0,.5), 0 0 10px rgba(255,255,255,.25);
+    transition: left .35s cubic-bezier(.34,1.4,.64,1), background .3s ease;
+  }
+  .motor-toggle[data-on="true"] .mt-knob{
+    left:27px;
+    background: radial-gradient(circle at 32% 28%, #fff, #b9ffce 45%, #3fcf82 100%);
+  }
+
+  /* ---------- stat rectangles: battery + runtime, icon + value only ---------- */
+  .stats-row{
+    display:flex;
+    gap:14px;
+    margin-top:20px;
+  }
+  .stat-card{
+    flex:1;
+    height:48px;
+    display:flex; align-items:center; justify-content:center; gap:9px;
+    background:transparent;
+    border:1px solid rgba(255,255,255,.22);
+    border-radius:10px;
+  }
+  .stat-card svg{ width:22px; height:auto; flex:none; display:block; }
+  .stat-card .stat-value{ font-size:16px; font-weight:700; font-variant-numeric:tabular-nums; color:#fff; line-height:1; }
+
+  /* settings button: same rectangle language as the stat cards above,
+     full width, icon only, centered — icon is the same 22px as battery/clock */
+  .settings-btn{
+    width:100%;
+    margin-top:20px;
+    appearance:none;
+    -webkit-appearance:none;
+    font:inherit;
+    padding:0;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    user-select: none;
+    touch-action: manipulation;
+    cursor:pointer;
+  }
+  .settings-btn:focus{ outline:none; }
+  .settings-btn:focus-visible{ outline:2px solid rgba(255,255,255,.55); outline-offset:3px; }
+</style>
+</head>
+<body>
+
+  <div id="hero-wrap">
+    <div id="mount"></div>
+  </div>
+
+  <div id="panel">
+    <button class="motor-toggle" id="motorToggle" data-on="false" aria-pressed="false">
+      <span class="mt-glow"></span>
+      <span class="mt-label">
+        <span class="mt-name">MOTOR</span>
+        <span class="mt-state">OFF</span>
+      </span>
+      <span class="mt-switch"><span class="mt-knob"></span></span>
+    </button>
+
+    <div class="stats-row">
+      <div class="stat-card">
+        <!-- monochrome battery icon; fill rect width is set by JS, not a static attribute -->
+        <svg viewBox="0 0 32 16">
+          <rect x="1" y="1" width="27" height="14" rx="3" fill="none" stroke="#fff" stroke-opacity=".85" stroke-width="1.6"/>
+          <rect x="29" y="5.5" width="2.4" height="5" rx="1" fill="#fff" fill-opacity=".85"/>
+          <rect id="battFillRect" x="3.3" y="3.3" width="0" height="9.4" rx="1.6" fill="#fff"/>
+        </svg>
+        <div class="stat-value" id="battVal">0%</div>
+      </div>
+      <div class="stat-card">
+        <!-- monochrome clock icon -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-opacity=".85" stroke-width="1.6">
+          <circle cx="12" cy="12" r="9.4"/>
+          <path d="M12 6.8V12l4 2.3" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <div class="stat-value" id="runVal">0m</div>
+      </div>
+    </div>
+
+    <button class="stat-card settings-btn" id="settingsBtn" aria-label="Settings">
+      <!-- monochrome gear icon, same 22px sizing as the battery/clock icons above -->
+      <svg viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="6.5" fill="none" stroke="#fff" stroke-opacity=".85" stroke-width="1.6"/>
+        <circle cx="12" cy="12" r="2.2" fill="none" stroke="#fff" stroke-opacity=".85" stroke-width="1.4"/>
+        <g fill="#fff" fill-opacity=".85">
+          <rect x="10.9" y="2.3" width="2.2" height="3.6" rx="1"/>
+          <rect x="10.9" y="2.3" width="2.2" height="3.6" rx="1" transform="rotate(60 12 12)"/>
+          <rect x="10.9" y="2.3" width="2.2" height="3.6" rx="1" transform="rotate(120 12 12)"/>
+          <rect x="10.9" y="2.3" width="2.2" height="3.6" rx="1" transform="rotate(180 12 12)"/>
+          <rect x="10.9" y="2.3" width="2.2" height="3.6" rx="1" transform="rotate(240 12 12)"/>
+          <rect x="10.9" y="2.3" width="2.2" height="3.6" rx="1" transform="rotate(300 12 12)"/>
+        </g>
+      </svg>
+    </button>
+  </div>
+
+  <!-- ═══════════════ MODAL BACKDROP ═══════════════ -->
+  <div class="modal-backdrop" id="modalBackdrop"></div>
+
+  <!-- ═══════════════ WATER LEVEL HISTORY MODAL ═══════════════ -->
+  <div class="modal-sheet" id="waterModal">
+    <div class="modal-header">
+      <div class="modal-title">Water Level History</div>
+      <div class="modal-close">✕</div>
+    </div>
+    <div class="view-tabs">
+      <div class="view-tab active" id="btnWaterViewLevel" data-mode="level">Water Level (%)</div>
+      <div class="view-tab" id="btnWaterViewConsumed" data-mode="consumed">Water Consumed (L)</div>
+    </div>
+    <div class="time-tabs">
+      <div class="time-tab active" data-hours="24">1D</div>
+      <div class="time-tab" data-hours="168">7D</div>
+      <div class="time-tab" data-hours="720">30D</div>
+      <div class="time-tab" data-hours="8760">1Y</div>
+    </div>
+    <div class="runtime-summary-bar" id="consumptionSummaryBar" style="display:none">
+      <span>Total Consumed: <strong id="consTotalVal">0 L</strong></span>
+      <span class="summary-sep">|</span>
+      <span>Fill Cycles: <strong id="consFillCountVal">0</strong></span>
+    </div>
+    <div class="chart-container"><canvas id="waterChartCanvas"></canvas></div>
+  </div>
+
+  <!-- ═══════════════ BATTERY HEALTH MODAL ═══════════════ -->
+  <div class="modal-sheet" id="batteryModal">
+    <div class="modal-header">
+      <div class="modal-title">🔋 Battery Health</div>
+      <div class="modal-close">✕</div>
+    </div>
+    <div class="time-tabs">
+      <div class="time-tab active" data-hours="1">1H</div>
+      <div class="time-tab" data-hours="24">24H</div>
+      <div class="time-tab" data-hours="168">7D</div>
+      <div class="time-tab" data-hours="720">30D</div>
+    </div>
+    <div class="chart-container"><canvas id="batteryChartCanvas"></canvas></div>
+  </div>
+
+  <!-- ═══════════════ MOTOR RUNTIME HISTORY MODAL ═══════════════ -->
+  <div class="modal-sheet" id="motorModal">
+    <div class="modal-header">
+      <div class="modal-title">Motor Runtime History</div>
+      <div class="modal-close">✕</div>
+    </div>
+    <div class="time-tabs">
+      <div class="time-tab" data-hours="6">6H</div>
+      <div class="time-tab active" data-hours="24">24H</div>
+      <div class="time-tab" data-hours="168">7D</div>
+      <div class="time-tab" data-hours="720">30D</div>
+    </div>
+    <div class="runtime-summary-bar" id="motorSummaryBar">
+      <span>Total: <strong id="motorTotalVal">0 min</strong></span>
+      <span class="summary-sep">|</span>
+      <span>Last Active: <strong id="motorLastActiveVal">--:--</strong></span>
+    </div>
+    <div class="chart-container"><canvas id="motorChartCanvas"></canvas></div>
+  </div>
+
+  <!-- ═══════════════ SETTINGS / CONFIG MODAL ═══════════════ -->
+  <div class="modal-sheet" id="settingsModal">
+    <div class="modal-header">
+      <div class="modal-title">⚙️ System Configuration</div>
+      <div class="modal-close">✕</div>
+    </div>
+
+    <div class="config-group">
+      <div class="config-group-title">Tank Calibration</div>
+      <div class="config-row"><span class="config-label">Top Level (cm)</span><input class="config-input" id="cfgTopLevel" type="number" value="25"></div>
+      <div class="config-row"><span class="config-label">Bottom Level (cm)</span><input class="config-input" id="cfgBottomLevel" type="number" value="150"></div>
+    </div>
+
+    <div class="config-group">
+      <div class="config-group-title">Timers &amp; Safety</div>
+      <div class="config-row"><span class="config-label">Normal Sleep (sec)</span><input class="config-input" id="cfgNormalInterval" type="number" value="300"></div>
+      <div class="config-row"><span class="config-label">Low Water (%)</span><input class="config-input" id="cfgLowThreshold" type="number" value="20"></div>
+      <div class="config-row"><span class="config-label">Max Motor (sec)</span><input class="config-input" id="cfgMaxRuntime" type="number" value="3600"></div>
+    </div>
+    <button class="glass-btn success" id="btnSaveConfig">Save Configuration</button>
+
+    <div class="config-group" style="margin-top:22px">
+      <div class="config-group-title">Pre-Peak Fill</div>
+      <div class="config-row"><span class="config-label">Enabled</span><div class="glass-toggle on" id="prePeakToggle"><div class="glass-toggle-knob"></div></div></div>
+      <div class="config-row"><span class="config-label">Peak Hour</span><input class="config-input" id="cfgPeakHour" type="number" value="17" min="0" max="23"></div>
+      <div class="config-row"><span class="config-label">Peak Minute</span><input class="config-input" id="cfgPeakMinute" type="number" value="30" min="0" max="59"></div>
+      <div class="config-row"><span class="config-label">Water Threshold (%)</span><input class="config-input" id="cfgPeakThreshold" type="number" value="60" min="0" max="100"></div>
+    </div>
+    <button class="glass-btn" id="btnSavePrePeak">Save Pre-Peak Config</button>
+
+    <div class="config-group" style="margin-top:22px">
+      <div class="config-group-title">Wireless OTA Update</div>
+      <button class="glass-btn" id="btnOtaStart">Enter OTA Firmware Mode</button>
+      <button class="glass-btn danger" id="btnOtaExit">Exit OTA Mode</button>
+    </div>
+
+    <div class="config-group" style="margin-top:22px">
+      <div class="config-group-title">System Log</div>
+      <div class="log-console" id="logConsole"></div>
+    </div>
+  </div>
+
+<style>
+  .liquid-progress{
+    position:relative;
+    width:var(--lp-size, 220px);
+    height:var(--lp-size, 220px);
+    border-radius:50%;
+    overflow:hidden;
+    background:#000;
+    container-type:inline-size;
+  }
+  .liquid-progress canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+  .liquid-progress .lp-readout{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    pointer-events:none;
+  }
+  .liquid-progress .lp-num{
+    font-family: ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-variant-numeric:tabular-nums; font-weight:600; letter-spacing:-.03em; color:#fff;
+    font-size:clamp(26px,22cqw,52px); line-height:1;
+    text-shadow:0 2px 14px rgba(0,0,30,.9), 0 0 2px rgba(0,0,50,.95);
+    -webkit-font-smoothing:antialiased;
+  }
+  .liquid-progress .lp-pct{ font-size:.42em; font-weight:500; opacity:.75; vertical-align:.6em; margin-left:.06em; }
+  .liquid-progress .lp-fallback{
+    position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+  }
+  .liquid-progress .lp-fallback i{
+    width:64%; aspect-ratio:1; border-radius:50%; border:8px solid #3d8bff;
+    box-shadow:0 0 30px rgba(61,107,255,.45);
+  }
+  .liquid-progress.lp-no-webgl .lp-fallback{ display:flex; }
+  .liquid-progress.lp-no-webgl canvas{ display:none; }
+</style>
+
+<template id="liquid-progress-template">
+  <div class="liquid-progress">
+    <canvas></canvas>
+    <div class="lp-fallback"><i></i></div>
+    <div class="lp-readout"><div class="lp-num"><span class="lp-num-val">0</span><span class="lp-pct">%</span></div></div>
+  </div>
+</template>
+
+<script>
+window.LiquidProgress = (function(){
+
+  const VS = `attribute vec2 aPos; void main(){ gl_Position=vec4(aPos,0.0,1.0); }`;
+
+  const FS = `
+  precision highp float;
+  uniform vec2  uRes;
+  uniform float uTime, uFill, uEnergy, uQuality;
+
+  float smin(float a,float b,float k){ float h=clamp(0.5+0.5*(b-a)/k,0.0,1.0); return mix(b,a,h)-k*h*(1.0-h); }
+  float sdSphere(vec3 p,float r){ return length(p)-r; }
+  float sdTorus(vec3 p,float R,float r){ vec2 q=vec2(length(p.xy)-R,p.z); return length(q)-r; }
+  float hash(float n){ return fract(sin(n*127.1)*43758.5453); }
+
+  float map(vec3 p){
+    float fill=uFill;
+    float e=max(uEnergy,0.55);
+    float calm=(0.30+0.70*e)*(1.0-0.45*fill);
+    float R=1.0;
+    float tube=max((1.0 - sqrt(max(1.0-clamp(fill,0.0,1.0),0.0))) * 0.5, 0.035);
+    float Rc=max(R-tube,0.0);
+
+    float a=atan(p.y,p.x);
+    float wob=calm*(0.026*sin(a*3.0+uTime*1.05)
+                   +0.018*sin(a*5.0-uTime*0.75)
+                   +0.011*sin(a*8.0+uTime*1.80));
+    float d=sdTorus(p,Rc,max(tube+wob,0.025));
+
+    d += 0.018*sin(p.x*9.0 + uTime*1.35)
+       + 0.014*sin(p.y*7.3 - uTime*1.70)
+       + 0.012*sin(p.z*11.1 + uTime*2.05 + p.x*3.0);
+
+    for(int i=0;i<3;i++){
+      float fi=float(i);
+      float an=uTime*(0.40+0.15*fi)+fi*2.2;
+      float orbitR = mix(Rc, R*0.80, fill);
+      vec3  c=vec3(cos(an),sin(an),0.0)*orbitR;
+      float rr=tube*0.55+(0.055+0.040*sin(uTime*1.6+fi*2.3))*calm;
+      d=smin(d,sdSphere(p-c,rr),0.19);
+    }
+
+    for(int j=0;j<4;j++){
+      float fj=float(j);
+      float seed=hash(fj+3.0);
+      float tt=uTime*0.34+fj*0.23+seed;
+      float ph=fract(tt);
+      float an=seed*6.2831+fj*1.35+floor(tt)*2.4;
+      vec3  base=vec3(cos(an),sin(an),0.0)*Rc;
+      vec3  dir=normalize(vec3(cos(an),sin(an),(seed-0.5)*0.5));
+      vec3  c=base+dir*(ph*0.80)+vec3(0.0,-0.45*ph*ph,0.0);
+      float rr=(0.075-0.026*seed)*(1.0-0.85*ph)*smoothstep(0.0,0.10,ph)*e;
+      d=smin(d,sdSphere(p-c,max(rr,0.0)),0.13);
+    }
+    return d;
+  }
+
+  vec3 calcNormal(vec3 p){
+    vec2 e=vec2(1.0,-1.0)*0.0020;
+    return normalize(e.xyy*map(p+e.xyy)+e.yyx*map(p+e.yyx)+e.yxy*map(p+e.yxy)+e.xxx*map(p+e.xxx));
+  }
+  float ao(vec3 p,vec3 n){
+    if(uQuality<0.5) return 0.85;
+    float o=0.0,s=1.0;
+    for(int i=0;i<4;i++){ float h=0.03+0.13*float(i); o+=(h-map(p+n*h))*s; s*=0.72; }
+    return clamp(1.0-1.4*o,0.0,1.0);
+  }
+  vec3 env(vec3 rd){
+    float t=clamp(rd.y*0.5+0.5,0.0,1.0);
+    vec3 c=mix(vec3(0.01,0.03,0.10),vec3(0.20,0.45,1.00),t);
+    c+=vec3(0.55,0.75,1.0)*pow(max(dot(rd,normalize(vec3(-0.5,0.75,0.45))),0.0),20.0);
+    return c;
+  }
+
+  void main(){
+    vec2 uv=(gl_FragCoord.xy-0.5*uRes)/min(uRes.x,uRes.y);
+    vec3 ro=vec3(0.0,0.22,3.25);
+    vec3 ww=normalize(-ro);
+    vec3 uu=normalize(cross(vec3(0.0,1.0,0.0),ww));
+    vec3 vv=cross(ww,uu);
+    vec3 rd=normalize(uv.x*uu+uv.y*vv+2.05*ww);
+
+    float maxSteps = uQuality<0.5 ? 48.0 : 80.0;
+    float t=0.0,glow=0.0,hit=0.0;
+    for(int i=0;i<80;i++){
+      if(float(i)>maxSteps) break;
+      vec3 p=ro+rd*t;
+      float d=map(p);
+      glow+=0.0015/(0.014+d*d);
+      if(d<0.0015){ hit=1.0; break; }
+      t+=d*0.85;
+      if(t>6.0) break;
+    }
+
+    vec3 col=vec3(0.0);
+    if(hit>0.5){
+      vec3 p=ro+rd*t, n=calcNormal(p), v=-rd;
+      vec3 l1=normalize(vec3(-0.55,0.85,0.75));
+      vec3 l2=normalize(vec3( 0.80,-0.35,0.40));
+      float dif=max(dot(n,l1),0.0);
+      float dif2=max(dot(n,l2),0.0);
+      float fre=pow(1.0-max(dot(n,v),0.0),3.0);
+      float spec=pow(max(dot(reflect(-l1,n),v),0.0),64.0);
+      float spc2=pow(max(dot(reflect(-l2,n),v),0.0),18.0);
+      float occ=ao(p,n);
+      col  = vec3(0.012,0.055,0.32);
+      col += vec3(0.06,0.32,0.95)*dif*0.95;
+      col += vec3(0.45,0.72,1.00)*dif2*0.22;
+      col += env(reflect(rd,n))*fre*0.85*mix(0.70,1.35,uFill);
+      col += vec3(1.0)*spec*0.9*mix(0.75,1.25,uFill);
+      col += vec3(0.5,0.8,1.0)*spc2*0.25*mix(0.75,1.25,uFill);
+      col *= mix(0.45,1.0,occ);
+      col += vec3(0.03,0.10,0.30)*(1.0-occ)*0.6;
+      col *= mix(0.82,1.28,uFill);
+    }
+    col+=vec3(0.10,0.30,0.85)*glow*0.50;
+    col=col/(1.0+col*0.55);
+    col=pow(max(col,0.0),vec3(0.4545));
+    gl_FragColor=vec4(col,1.0);
+  }`;
+
+  function compile(gl,type,src){
+    const sh=gl.createShader(type); gl.shaderSource(sh,src); gl.compileShader(sh);
+    if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS)){ console.error(gl.getShaderInfoLog(sh)); return null; }
+    return sh;
+  }
+
+  function create(mount, opts){
+    opts = opts || {};
+    const size  = opts.size  || 220;
+    const start = Math.max(0, Math.min(100, opts.value || 0));
+
+    const tpl = document.getElementById('liquid-progress-template');
+    const root = tpl.content.firstElementChild.cloneNode(true);
+    root.style.setProperty('--lp-size', size + 'px');
+    mount.appendChild(root);
+
+    const canvas = root.querySelector('canvas');
+    const numEl  = root.querySelector('.lp-num-val');
+
+    const gl = canvas.getContext('webgl',{antialias:false,alpha:false,powerPreference:'low-power'})
+            || canvas.getContext('experimental-webgl');
+
+    if(!gl){
+      root.classList.add('lp-no-webgl');
+      return { set(){}, get(){ return 0; }, destroy(){ root.remove(); } };
+    }
+
+    const vs = compile(gl, gl.VERTEX_SHADER, VS);
+    const fs = compile(gl, gl.FRAGMENT_SHADER, FS);
+    if(!vs || !fs){
+      root.classList.add('lp-no-webgl');
+      return { set(){}, get(){ return 0; }, destroy(){ root.remove(); } };
+    }
+
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+    if(!gl.getProgramParameter(prog, gl.LINK_STATUS)){
+      console.error(gl.getProgramInfoLog(prog));
+      root.classList.add('lp-no-webgl');
+      return { set(){}, get(){ return 0; }, destroy(){ root.remove(); } };
+    }
+    gl.useProgram(prog);
+
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+    const aPos = gl.getAttribLocation(prog, 'aPos');
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+    const U = {
+      res: gl.getUniformLocation(prog,'uRes'), time: gl.getUniformLocation(prog,'uTime'),
+      fill: gl.getUniformLocation(prog,'uFill'), energy: gl.getUniformLocation(prog,'uEnergy'),
+      quality: gl.getUniformLocation(prog,'uQuality')
+    };
+
+    let quality = 1;
+    function resize(){
+      const css = canvas.clientWidth || size;
+      const dpr = Math.min(window.devicePixelRatio || 1, css < 180 ? 1.5 : 1.75);
+      const w = Math.max(1, Math.round(css * dpr));
+      const h = Math.max(1, Math.round((canvas.clientHeight || css) * dpr));
+      quality = css < 170 ? 0 : 1;
+      if(canvas.width !== w || canvas.height !== h){
+        canvas.width = w; canvas.height = h; gl.viewport(0, 0, w, h);
+      }
+    }
+
+    let target = start, shown = start, energy = 0, clock = 0;
+    let visible = true, paused = false, destroyed = false;
+
+    const ro = new ResizeObserver(resize);
+    ro.observe(root);
+    const io = new IntersectionObserver(es => { visible = es[0].isIntersecting; }, { threshold: 0 });
+    io.observe(root);
+    const onVis = () => { paused = document.hidden; };
+    document.addEventListener('visibilitychange', onVis);
+
+    let last = performance.now(), acc = 0;
+    function frame(now){
+      if(destroyed) return;
+      requestAnimationFrame(frame);
+      const dt = Math.min((now - last) / 1000, 0.05); last = now;
+      if(paused || !visible) return;
+
+      const prev = shown;
+      shown += (target - shown) * Math.min(dt * 3.2, 1);
+      const rate = Math.abs(shown - prev) / Math.max(dt, 1e-4);
+      energy += (Math.min(rate / 12, 1) - energy) * Math.min(dt * 2.2, 1);
+
+      const active = energy > 0.02;
+      acc += dt;
+      if(!active && acc < 1/24) return;
+      acc = 0;
+
+      clock += dt;
+      numEl.textContent = Math.round(shown);
+      resize();
+      gl.uniform2f(U.res, canvas.width, canvas.height);
+      gl.uniform1f(U.time, clock);
+      gl.uniform1f(U.fill, Math.pow(shown / 100, 0.85));
+      gl.uniform1f(U.energy, energy);
+      gl.uniform1f(U.quality, quality);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    resize();
+    requestAnimationFrame(frame);
+
+    return {
+      set(v){ target = Math.max(0, Math.min(100, +v || 0)); },
+      get(){ return shown; },
+      destroy(){
+        destroyed = true;
+        ro.disconnect(); io.disconnect();
+        document.removeEventListener('visibilitychange', onVis);
+        const ext = gl.getExtension('WEBGL_lose_context');
+        if(ext) ext.loseContext();
+        root.remove();
+      }
+    };
+  }
+
+  return { create };
+})();
+</script>
+
+<script>
+window.LiquidDashboard = (function(){
+  const heroWrap    = document.getElementById('hero-wrap');
+  const panel       = document.getElementById('panel');
+  const motorBtn    = document.getElementById('motorToggle');
+  const battVal     = document.getElementById('battVal');
+  const battFill    = document.getElementById('battFillRect');
+  const runVal      = document.getElementById('runVal');
+  const settingsBtn = document.getElementById('settingsBtn');
+
+  const BATT_FILL_MAX = 22.4; // matches the icon's inner drawable width, in SVG units
+
+  const gauge = LiquidProgress.create(document.getElementById('mount'), { size: 220, value: 0 });
+
+  let docked = false;
+  let justDocked = false;
+  function dock(){
+    if(docked) return;
+    docked = true;
+    justDocked = true;
+    heroWrap.classList.add('docked');
+    heroWrap.style.cursor = 'default';
+    setTimeout(() => panel.classList.add('revealed'), 260);
+    setTimeout(() => { justDocked = false; }, 350);
+  }
+  heroWrap.addEventListener('click', dock);
+
+  let motorListeners = [];
+  motorBtn.addEventListener('click', () => {
+    const wantsOn = motorBtn.getAttribute('data-on') !== 'true';
+    applyMotorState(wantsOn);
+    motorListeners.forEach(cb => cb(wantsOn));
+  });
+
+  function applyMotorState(isOn){
+    motorBtn.setAttribute('data-on', String(isOn));
+    motorBtn.setAttribute('aria-pressed', String(isOn));
+    motorBtn.querySelector('.mt-state').textContent = isOn ? 'ON' : 'OFF';
+  }
+
+  let settingsListeners = [];
+  settingsBtn.addEventListener('click', () => {
+    settingsListeners.forEach(cb => cb());
+  });
+
+  return {
+    setProgress(v){ gauge.set(v); },
+
+    setBattery(pct){
+      pct = Math.max(0, Math.min(100, +pct || 0));
+      battVal.textContent = Math.round(pct) + '%';
+      battFill.setAttribute('width', String((pct / 100) * BATT_FILL_MAX));
+    },
+
+    setRuntime(text){ runVal.textContent = text; },
+
+    setMotor(isOn){ applyMotorState(!!isOn); },
+
+    onMotorToggle(callback){ motorListeners.push(callback); },
+
+    /** Register a handler that fires when the settings icon is tapped —
+     *  e.g. to open a settings sheet/modal you build elsewhere. */
+    onSettingsClick(callback){ settingsListeners.push(callback); },
+
+    dock(){ dock(); },
+
+    isDocked(){ return docked; },
+
+    wasJustDocked(){ return justDocked; },
+
+    destroy(){
+      gauge.destroy();
+      motorListeners = [];
+      settingsListeners = [];
+    }
+  };
+})();
+</script>
+<script src="/static/js/websocket.js"></script>
+<script src="/static/js/modals.js"></script>
+</body>
+</html>

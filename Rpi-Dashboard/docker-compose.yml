@@ -1,0 +1,21 @@
+# =============================================================================
+# Water Tank Monitor V2 — Docker Compose (Option A: Using Existing MQTT Broker)
+# Connects to host's existing MQTT broker on Port 1883
+# Exposes Web Dashboard on Port 8001
+# =============================================================================
+
+services:
+  dashboard:
+    build: .
+    container_name: water-tank-dashboard
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - DB_PATH=/app/data/water_tank.db
+      - MQTT_BROKER=host.docker.internal
+      - MQTT_PORT=1883
+    restart: unless-stopped
