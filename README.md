@@ -20,7 +20,7 @@ The system is architectured across **three hardware layers**:
 
 | Layer | Hardware | Role |
 |---|---|---|
-| **TX Node** | Xiao ESP32-C6 | Battery-powered sensor node — deep sleep, ultrasonics, ESP-NOW |
+| **TX Node** | Xiao ESP32-C6 | Solar + Battery-powered sensor node — deep sleep, ultrasonics, ESP-NOW |
 | **RX Gateway** | ESP32-S3 | Mains-powered relay controller & Wi-Fi/ESP-NOW bridge |
 | **Dashboard** | Raspberry Pi 5 | FastAPI backend, SQLite storage, WebSocket UI |
 
