@@ -3,7 +3,8 @@
 
 #include <Arduino.h>
 
-#define BATTERY_ADC_PIN 2
+#define BATTERY_ADC_PIN A0
+#define ANALOG_IN_PIN   A0
 
 struct BatteryReading {
     uint16_t rawAdc;

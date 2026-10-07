@@ -59,21 +59,53 @@ void TxStateManager::clearOTAMode() {
     Serial.println("[TxState] OTA Mode CLEARED in RTC Memory.");
 }
 
+RTC_DATA_ATTR static uint8_t rtcShortSleepRetries = 0;
+RTC_DATA_ATTR static bool rtcShouldShortSleep = false;
+
 void TxStateManager::touchSessionActivity() {
     _lastSessionActivityMs = millis();
     _consecutiveFailures = 0;
 }
 
-void TxStateManager::recordTransmissionResult(bool success) {
+void TxStateManager::recordTransmissionResult(bool success, uint8_t waterPercentage, uint8_t lowWaterThreshold) {
     if (success) {
         _consecutiveFailures = 0;
         _lastSessionActivityMs = millis();
+        rtcShortSleepRetries = 0;
+        rtcShouldShortSleep = false;
     } else {
         _consecutiveFailures++;
         if (rtcOperatingMode == MODE_CONFIG_SESSION) {
             Serial.printf("[TxState] Live session transmission failed (%u/5 consecutive failures)\n", _consecutiveFailures);
         }
+        
+        // Evaluate Tx Short-Sleep trigger for low water condition
+        if (waterPercentage <= lowWaterThreshold && lowWaterThreshold > 0 && rtcShortSleepRetries < 3) {
+            rtcShortSleepRetries++;
+            rtcShouldShortSleep = true;
+            Serial.printf("[TxState] ACK FAILED at Low Water (%u%% <= %u%%)! Triggering 15s short-sleep to re-sync (Attempt %u/3).\n",
+                          waterPercentage, lowWaterThreshold, rtcShortSleepRetries);
+        } else {
+            if (rtcShortSleepRetries >= 3) {
+                Serial.println("[TxState] Short-sleep retry cap (3) reached. Falling back to normal sleep to preserve battery.");
+            }
+            rtcShortSleepRetries = 0;
+            rtcShouldShortSleep = false;
+        }
     }
+}
+
+bool TxStateManager::shouldShortSleep() const {
+    return rtcShouldShortSleep;
+}
+
+uint8_t TxStateManager::getShortSleepRetries() const {
+    return rtcShortSleepRetries;
+}
+
+void TxStateManager::resetShortSleepRetries() {
+    rtcShortSleepRetries = 0;
+    rtcShouldShortSleep = false;
 }
 
 bool TxStateManager::checkSessionTimeout() {

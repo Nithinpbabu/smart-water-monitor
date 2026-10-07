@@ -8,9 +8,7 @@
 #include "espnow_tx.h"
 #include "motor_state.h"
 #include "ota_manager.h"
-
-const char* OTA_WIFI_SSID = "pallachi4G";
-const char* OTA_WIFI_PASS = "pallachiyil@123";
+#include "secrets.h"  // gitignored — copy secrets.h.example and fill in credentials
 
 const bool TX_USE_EXTERNAL_ANTENNA = true;
 uint8_t TARGET_RX_MAC[6] = { 0x94, 0xA9, 0x90, 0x03, 0x4B, 0xB8 };
@@ -62,9 +60,15 @@ void loop() {
     TankConfig cfg = configMgr.getEffectiveConfig();
     
     if (mode == MODE_NORMAL) {
-        Serial.printf("[Tx Main] NORMAL mode active. Going to deep sleep for %u seconds.\n", 
-                      cfg.normalSleepIntervalSeconds);
-        sleepMgr.goToDeepSleep(cfg.normalSleepIntervalSeconds);
+        if (txState.shouldShortSleep()) {
+            Serial.printf("[Tx Main] LOW WATER & ACK FAILED! Short-sleeping 15s to re-sync (Attempt %u/3)...\n",
+                          txState.getShortSleepRetries());
+            sleepMgr.goToDeepSleep(15);
+        } else {
+            Serial.printf("[Tx Main] NORMAL mode active. Going to deep sleep for %u seconds.\n", 
+                          cfg.normalSleepIntervalSeconds);
+            sleepMgr.goToDeepSleep(cfg.normalSleepIntervalSeconds);
+        }
     } 
     else if (mode == MODE_MOTOR_FILLING) {
         uint32_t intervalMs = cfg.motorMonitoringIntervalSeconds * 1000;
@@ -120,7 +124,7 @@ void performMeasurementAndTransmit() {
     espNowTx.clearInboundMessage();
     bool txSuccess = espNowTx.sendSensorData(packet);
     
-    txState.recordTransmissionResult(txSuccess);
+    txState.recordTransmissionResult(txSuccess, water.percentage, cfg.lowWaterThreshold);
     
     if (isFull) {
         FullDetectedPacket fullPkt;

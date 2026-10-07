@@ -25,7 +25,10 @@ public:
     void clearOTAMode();
     
     void touchSessionActivity();
-    void recordTransmissionResult(bool success);
+    void recordTransmissionResult(bool success, uint8_t waterPercentage = 100, uint8_t lowWaterThreshold = 0);
+    bool shouldShortSleep() const;
+    uint8_t getShortSleepRetries() const;
+    void resetShortSleepRetries();
     bool checkSessionTimeout();
     
     bool updateState(uint8_t waterPercentage);

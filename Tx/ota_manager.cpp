@@ -2,12 +2,12 @@
 #include "motor_state.h"
 #include <esp_now.h>
 
-TxOTAManager txOTA;
+TxOtaManager txOTA;
 
-TxOTAManager::TxOTAManager() 
+TxOtaManager::TxOtaManager() 
     : _isOTAActive(false), _otaStartTimeMs(0), _mqttClient(_wifiClient) {}
 
-void TxOTAManager::mqttCallback(char* topic, byte* payload, unsigned int length) {
+void TxOtaManager::mqttCallback(char* topic, byte* payload, unsigned int length) {
     char message[64];
     if (length >= sizeof(message)) length = sizeof(message) - 1;
     memcpy(message, payload, length);
@@ -27,7 +27,7 @@ void TxOTAManager::mqttCallback(char* topic, byte* payload, unsigned int length)
     }
 }
 
-void TxOTAManager::setupMqtt() {
+void TxOtaManager::setupMqtt() {
     _mqttClient.setServer("192.168.29.211", 1883);
     _mqttClient.setCallback(mqttCallback);
     
@@ -43,7 +43,7 @@ void TxOTAManager::setupMqtt() {
     }
 }
 
-void TxOTAManager::handleMqtt() {
+void TxOtaManager::handleMqtt() {
     if (!_mqttClient.connected()) {
         static uint32_t lastRetry = 0;
         if (millis() - lastRetry > 5000) {
@@ -59,7 +59,7 @@ void TxOTAManager::handleMqtt() {
     }
 }
 
-bool TxOTAManager::begin(const char* ssid, const char* password) {
+bool TxOtaManager::begin(const char* ssid, const char* password) {
     Serial.println("\n[Tx OTA] Initiating Wireless OTA Mode...");
     
     // 1. De-initialize ESP-NOW and cleanly reset Wi-Fi radio & LwIP socket stack
@@ -131,7 +131,7 @@ bool TxOTAManager::begin(const char* ssid, const char* password) {
     return true;
 }
 
-void TxOTAManager::update() {
+void TxOtaManager::update() {
     if (!_isOTAActive) return;
     
     ArduinoOTA.handle();
@@ -146,7 +146,7 @@ void TxOTAManager::update() {
     }
 }
 
-void TxOTAManager::stop() {
+void TxOtaManager::stop() {
     Serial.println("[Tx OTA] Exit requested. Rebooting node to Normal Mode...");
     txState.clearOTAMode();
     delay(500);

@@ -7,6 +7,9 @@
 .env
 .env.local
 
+# Arduino secrets (Wi-Fi credentials for OTA) — copy secrets.h.example → secrets.h
+Tx/secrets.h
+
 # Python
 __pycache__/
 *.py[cod]

@@ -5,9 +5,12 @@
 #include "config.h"
 
 // Hardware Pin Definitions for Xiao ESP32-C3
-#define ECHO_PIN       D2
-#define TRIG_PIN       D3
-#define SENSOR_PWR_PIN D10
+#define ECHO_PIN            D2
+#define TRIG_PIN            D3
+#define SENSOR_PWR_PIN      D10
+
+#define ULTRASONIC_ECHO_PIN ECHO_PIN
+#define ULTRASONIC_TRIG_PIN TRIG_PIN
 
 struct WaterReading {
     uint16_t distanceCm;   // Ultrasonic measured distance

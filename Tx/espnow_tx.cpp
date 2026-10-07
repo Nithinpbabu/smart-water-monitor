@@ -34,10 +34,10 @@ bool EspNowTxManager::begin() {
     return true;
 }
 
-void EspNowTxManager::registerPeer() {
+void EspNowTxManager::registerPeer(uint8_t channel) {
     esp_now_peer_info_t peerInfo = {};
     memcpy(peerInfo.peer_addr, _targetMac, 6);
-    peerInfo.channel = rtcLastKnownChannel;
+    peerInfo.channel = (channel > 0) ? channel : rtcLastKnownChannel;
     peerInfo.encrypt = false;
     
     if (esp_now_is_peer_exist(_targetMac)) {
@@ -98,7 +98,7 @@ bool EspNowTxManager::sendSensorData(const SensorPacket& packet) {
         clearInboundMessage();
         
         esp_wifi_set_channel(rtcLastKnownChannel, WIFI_SECOND_CHAN_NONE);
-        registerPeer();
+        registerPeer(rtcLastKnownChannel);
         
         esp_err_t result = esp_now_send(_targetMac, (const uint8_t *)&packet, sizeof(SensorPacket));
         if (result == ESP_OK) {
@@ -115,7 +115,7 @@ bool EspNowTxManager::sendSensorData(const SensorPacket& packet) {
             if (ch == rtcLastKnownChannel) continue;
             
             esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-            registerPeer();
+            registerPeer(ch);
             
             sendComplete = false;
             sendSuccess = false;

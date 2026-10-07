@@ -36,6 +36,9 @@ void EspNowGatewayManager::onDataRecv(const uint8_t *mac_addr, const uint8_t *da
         // 1. Auto-register Tx MAC as unicast peer
         espNowGateway.registerPeer(srcMac);
         
+        // Update telemetry watchdog timestamp
+        motorCtrl.updateTelemetryTimestamp();
+        
         // 2. Evaluate auto-fill triggers FIRST so motor state is updated before building ACK/Response
         ConfigPacket currentCfg = espNowGateway.getActiveConfig();
         if (!motorCtrl.isMotorOn() && pkt.waterPercentage <= currentCfg.lowWaterThreshold && currentCfg.lowWaterThreshold > 0) {

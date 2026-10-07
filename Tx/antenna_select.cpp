@@ -4,6 +4,7 @@
 #define PIN_RF_ANT_SELECT    14
 
 void configureTxAntenna(AntennaType type) {
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
     // Step 1: Enable RF switch IC power (Active LOW on GPIO 3)
     pinMode(PIN_RF_SWITCH_POWER, OUTPUT);
     digitalWrite(PIN_RF_SWITCH_POWER, LOW);
@@ -19,4 +20,7 @@ void configureTxAntenna(AntennaType type) {
         digitalWrite(PIN_RF_ANT_SELECT, LOW);
         Serial.println("[Tx Antenna] RF Switch configured for INTERNAL Ceramic Antenna (GPIO3=LOW, GPIO14=LOW).");
     }
+#else
+    Serial.println("[Tx Antenna] Xiao ESP32-C3 node active (RF Switch pin 3 bypass active).");
+#endif
 }

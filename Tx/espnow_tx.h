@@ -45,7 +45,7 @@ private:
     static volatile bool sendComplete;
     static volatile bool sendSuccess;
     
-    void registerPeer();
+    void registerPeer(uint8_t channel = 0);
 };
 
 extern EspNowTxManager espNowTx;

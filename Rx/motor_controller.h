@@ -20,12 +20,15 @@ public:
     void setMaxRuntimeSeconds(uint32_t sec) { _maxRuntimeSec = sec; }
     
     void handleFullDetected();
+    void updateTelemetryTimestamp();
     void update();
 
 private:
     bool _motorOn;
     uint32_t _startTimeMs;
     uint32_t _maxRuntimeSec;
+    uint32_t _lastTelemetryRecvMs;
+    bool _initialSyncPending;
 };
 
 extern MotorController motorCtrl;
