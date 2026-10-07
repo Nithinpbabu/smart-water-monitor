@@ -14,7 +14,7 @@
 
 ## Overview
 
-Water Tank Monitor V2 is a **fully autonomous, local-network IoT system** deployed on a real rooftop water tank. It continuously measures water level, controls the pump motor, and serves a live dashboard — all without any cloud dependency.
+Water Tank Monitor is a **fully autonomous, local-network IoT system** deployed on a real rooftop water tank. It continuously measures water level, controls the pump motor, and serves a live dashboard — all without any cloud dependency.
 
 The system is architectured across **three hardware layers**:
 
