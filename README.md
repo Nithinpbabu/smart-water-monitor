@@ -1,4 +1,4 @@
-# 💧 Water Tank Monitor V2
+# 💧 Water Tank Monitor 
 
 > **A production-deployed, three-layer IoT system** for real-time water tank monitoring, automated motor control, and historical consumption analytics — built on a 500 L rooftop tank.
 
